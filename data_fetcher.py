@@ -8,6 +8,7 @@ This lets backtesting and paper trading pull years of real historical data
 even when TESTNET=true.
 """
 
+import os
 import time
 import logging
 from datetime import datetime, timezone
@@ -186,17 +187,25 @@ class DataFetcher:
         return {tf: self.fetch_ohlcv(timeframe=tf, limit=cfg.timeframes.candles_required) for tf in tfs}
 
     def fetch_multi_tf_historical(self) -> Dict[str, pd.DataFrame]:
-        """Full historical range fetch for backtesting."""
+        """Full historical range fetch for backtesting. Caches to disk — downloads once."""
         bc = cfg.backtest
         tfs = [cfg.timeframes.trend_tf, cfg.timeframes.structure_tf, cfg.timeframes.entry_tf]
-        return {
-            tf: self.fetch_ohlcv_range(
-                timeframe=tf,
-                start_date=bc.start_date,
-                end_date=bc.end_date,
-            )
-            for tf in tfs
-        }
+        cache_dir = "data/cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        result = {}
+        for tf in tfs:
+            symbol_slug = cfg.exchange.symbol.replace("/", "")
+            cache_path = f"{cache_dir}/{symbol_slug}_{tf}_{bc.start_date}_{bc.end_date}.parquet"
+            if os.path.exists(cache_path):
+                logger.info("Loading %s %s from disk cache", cfg.exchange.symbol, tf)
+                result[tf] = pd.read_parquet(cache_path)
+            else:
+                df = self.fetch_ohlcv_range(timeframe=tf, start_date=bc.start_date, end_date=bc.end_date)
+                if not df.empty:
+                    df.to_parquet(cache_path)
+                    logger.info("Cached %s %s to %s", cfg.exchange.symbol, tf, cache_path)
+                result[tf] = df
+        return result
 
     # ─── Price and market data ────────────────────────────────────────────────
 

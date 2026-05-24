@@ -171,6 +171,7 @@ class Position:
     current_price: float = 0.0
     trailing_stop: Optional[float] = None
     partial_closed: bool = False   # TP1 hit
+    bars_held: int = 0
     status: TradeStatus = TradeStatus.OPEN
 
     @property

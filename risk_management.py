@@ -117,8 +117,16 @@ class RiskManager:
 
         for pos in list(self.open_positions):
             pos.current_price = current_price
+            pos.bars_held += 1
             s = pos.signal
             dir_ = s.direction
+
+            # ── Time-based exit: close if stalling before TP1 ────────────
+            if not pos.partial_closed and pos.bars_held > 12:
+                trade = self._close_position(pos, current_price, "time_exit", commission_pct)
+                newly_closed.append(trade)
+                self.open_positions.remove(pos)
+                continue
 
             # ── Partial close at TP1 ──────────────────────────────────────
             if not pos.partial_closed:
@@ -127,7 +135,7 @@ class RiskManager:
                     (dir_ == Direction.SHORT and current_price <= s.take_profit_1)
                 )
                 if tp1_hit:
-                    partial_size = pos.size * 0.5
+                    partial_size = pos.size * self.rc.partial_close_pct
                     pnl_per_unit = (current_price - s.entry_price) * (1 if dir_ == Direction.LONG else -1)
                     commission = partial_size * current_price * (commission_pct / 100)
                     pnl = pnl_per_unit * partial_size - commission

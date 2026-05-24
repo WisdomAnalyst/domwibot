@@ -35,17 +35,23 @@ class TimeframeConfig:
 
 # ─── Risk management ─────────────────────────────────────────────────────────
 
+def _is_futures() -> bool:
+    return os.getenv("USE_FUTURES", "false").lower() == "true"
+
+
 @dataclass
 class RiskConfig:
     account_balance_usdt: float = float(os.getenv("ACCOUNT_BALANCE", "1000"))
     risk_per_trade_pct: float = 1.0       # 1% risk — strict, professional standard
     max_open_trades: int = 2              # SOL is volatile — keep max 2
-    daily_loss_limit_pct: float = 4.0    # hard stop for the day at -4%
-    min_reward_risk: float = 3.0         # minimum 3:1 R:R — only A+ setups
-    max_leverage: float = 3.0            # conservative leverage
-    trailing_activate_r: float = 2.0     # trail activates at 2R
+    # Futures: 2x leverage means each 1% risk trade = 2% account exposure,
+    # so 4 losses hit 8% — double the spot limit to preserve the same trade count.
+    daily_loss_limit_pct: float = field(default_factory=lambda: 8.0 if _is_futures() else 4.0)
+    min_reward_risk: float = 1.5         # minimum 1.5:1 R:R (TP2 is fixed at 1.8R)
+    max_leverage: float = field(default_factory=lambda: 2.0 if _is_futures() else 3.0)
+    trailing_activate_r: float = 1.5     # trail activates at 1.5R
     trailing_atr_mult: float = 2.0       # SOL needs wider trail due to wicks
-    partial_close_pct: float = 0.5       # close 50% at TP1
+    partial_close_pct: float = 0.3       # close 30% at TP1, keep 70% for TP2
 
 
 # ─── Strategy (SOL/USDT tuned) ───────────────────────────────────────────────
@@ -59,18 +65,18 @@ class StrategyConfig:
 
     # RSI — wider band for SOL's volatility
     rsi_period: int = 14
-    rsi_oversold: float = 35.0
-    rsi_overbought: float = 65.0
+    rsi_oversold: float = 42.0
+    rsi_overbought: float = 58.0
 
     # ATR — wider stops for SOL wicks
     atr_period: int = 14
-    atr_sl_mult: float = 2.0
+    atr_sl_mult: float = 1.5
 
     # Order Block / FVG
     ob_lookback: int = 60
-    ob_min_body_pct: float = 0.35
-    ob_max_age_bars: int = 100
-    fvg_min_size_atr: float = 0.25
+    ob_min_body_pct: float = 0.25
+    ob_max_age_bars: int = 150
+    fvg_min_size_atr: float = 0.15
 
     # Swing pivots
     swing_lookback: int = 5
@@ -102,7 +108,7 @@ class StrategyConfig:
     funding_extreme_short: float = -0.0005 # <-0.05% funding → crowded shorts → avoid shorts
 
     # ── Confluence scoring ────────────────────────────────────────────────────
-    min_confluence_score: int = 6     # out of 10 — only take high-probability setups
+    min_confluence_score: int = 4     # out of 10 — loosened to generate more trades
 
 
 # ─── Backtesting ─────────────────────────────────────────────────────────────

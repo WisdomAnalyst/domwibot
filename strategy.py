@@ -46,6 +46,7 @@ class SMCStrategy:
         tf_data: Dict[str, pd.DataFrame],
         current_price: float,
         funding_rate: float = 0.0,
+        bar_time: Optional[datetime] = None,
     ) -> Optional[TradeSignal]:
         trend_tf = cfg.timeframes.trend_tf
         struct_tf = cfg.timeframes.structure_tf
@@ -55,15 +56,16 @@ class SMCStrategy:
             logger.warning("Missing timeframe data — skipping")
             return None
 
-        trend_df = apply_all(tf_data[trend_tf])
-        struct_df = apply_all(tf_data[struct_tf])
-        entry_df = apply_all(tf_data[entry_tf])
+        # Skip recomputing indicators if already applied (e.g. by backtester)
+        trend_df = tf_data[trend_tf] if "rsi" in tf_data[trend_tf].columns else apply_all(tf_data[trend_tf])
+        struct_df = tf_data[struct_tf] if "rsi" in tf_data[struct_tf].columns else apply_all(tf_data[struct_tf])
+        entry_df = tf_data[entry_tf] if "rsi" in tf_data[entry_tf].columns else apply_all(tf_data[entry_tf])
 
         if len(entry_df) < 50:
             return None
 
         # ── Gate 1: ICT Kill Zone ────────────────────────────────────────────
-        if self.sc.filter_by_session and not self._in_kill_zone():
+        if self.sc.filter_by_session and not self._in_kill_zone(bar_time):
             logger.debug("Outside kill zone — skip")
             return None
 
@@ -71,6 +73,12 @@ class SMCStrategy:
         bias = self._get_trend_bias(trend_df)
         if bias is None:
             logger.debug("No clear daily bias")
+            return None
+
+        # ── Gate 2b: 4H EMA must confirm daily bias ───────────────────────────
+        struct_bias = self._get_trend_bias(struct_df)
+        if struct_bias != bias:
+            logger.debug("4H trend conflicts with daily bias — skip")
             return None
 
         # ── Gate 3: Funding rate extreme filter ──────────────────────────────
@@ -94,8 +102,8 @@ class SMCStrategy:
 
     # ─── ICT Kill Zone ───────────────────────────────────────────────────────
 
-    def _in_kill_zone(self) -> bool:
-        hour = datetime.now(timezone.utc).hour
+    def _in_kill_zone(self, bar_time: Optional[datetime] = None) -> bool:
+        hour = (bar_time or datetime.now(timezone.utc)).hour
         for start, end in self.sc.kill_zones:
             if start <= hour < end:
                 return True
@@ -135,12 +143,10 @@ class SMCStrategy:
         sh_mask = find_swing_highs(df, n)
         sl_mask = find_swing_lows(df, n)
 
-        swing_highs, swing_lows = [], []
-        for i, (ts, row) in enumerate(df.iterrows()):
-            if sh_mask.iloc[i]:
-                swing_highs.append(SwingPoint(Direction.SHORT, float(row["high"]), ts, i))
-            if sl_mask.iloc[i]:
-                swing_lows.append(SwingPoint(Direction.LONG, float(row["low"]), ts, i))
+        sh_idx = np.where(sh_mask.values)[0]
+        sl_idx = np.where(sl_mask.values)[0]
+        swing_highs = [SwingPoint(Direction.SHORT, float(df.iloc[i]["high"]), df.index[i], i) for i in sh_idx]
+        swing_lows = [SwingPoint(Direction.LONG, float(df.iloc[i]["low"]), df.index[i], i) for i in sl_idx]
 
         ms = MarketStructure(swing_highs=swing_highs, swing_lows=swing_lows)
         ms.last_bos, ms.last_bos_price, ms.last_bos_time, ms.trend = (
@@ -419,6 +425,16 @@ class SMCStrategy:
         adx_val = float(last.get("adx", 0))
         sc = self.sc
 
+        # Gate: require trending market (ADX > 25 filters choppy conditions)
+        if adx_val < 25:
+            logger.debug("ADX too weak (%.1f) — skip", adx_val)
+            return None
+
+        # Gate: require above-average volume (filters false breakouts)
+        if vol_ratio < 1.2:
+            logger.debug("Volume below threshold (%.2f) — skip", vol_ratio)
+            return None
+
         score = 0
         notes = []
 
@@ -509,11 +525,9 @@ class SMCStrategy:
         if risk_dist <= 0:
             return None
 
-        tp2 = self._next_liquidity_target(struct_ms, current_price, bias)
-        if tp2 == 0:
-            tp2 = (current_price + cfg.risk.min_reward_risk * risk_dist
-                   if bias == Direction.LONG
-                   else current_price - cfg.risk.min_reward_risk * risk_dist)
+        # Fixed 1.8R TP2 — closer target, hit more often
+        tp2 = (current_price + 1.8 * risk_dist if bias == Direction.LONG
+               else current_price - 1.8 * risk_dist)
 
         tp1 = (current_price + risk_dist if bias == Direction.LONG
                else current_price - risk_dist)

@@ -14,6 +14,7 @@ from typing import List, Optional, Dict
 
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 
 from config import cfg
 from models import Direction, ClosedTrade, PortfolioStats, TradeSignal
@@ -39,6 +40,7 @@ class Backtester:
         self.rm.rc.account_balance_usdt = self.bc.initial_capital
 
         self.equity_curve: List[float] = []
+        self.equity_timestamps: List = []
         self.trade_log: List[ClosedTrade] = []
 
     # ─── Main run ─────────────────────────────────────────────────────────────
@@ -66,7 +68,9 @@ class Backtester:
             len(entry_df), self.bc.start_date, self.bc.end_date, balance
         )
 
-        for i in range(200, len(entry_df)):
+        window = cfg.timeframes.candles_required
+        bar_range = range(200, len(entry_df))
+        for i in tqdm(bar_range, desc="Backtesting", unit="bar", ncols=80, dynamic_ncols=False):
             bar_ts = entry_df.index[i]
             current_price = float(entry_df.iloc[i]["close"])
 
@@ -79,13 +83,16 @@ class Backtester:
                 balance += t.pnl
                 self.trade_log.append(t)
 
-            # Slice history up to current bar for each timeframe
-            entry_slice = entry_df.iloc[:i + 1]
-            struct_slice = struct_df.loc[struct_df.index <= bar_ts].tail(cfg.timeframes.candles_required)
-            trend_slice = trend_df.loc[trend_df.index <= bar_ts].tail(cfg.timeframes.candles_required)
+            # Fixed-window slices — O(log n) per bar via searchsorted
+            entry_slice = entry_df.iloc[max(0, i - window + 1):i + 1]
+            s_end = struct_df.index.searchsorted(bar_ts, side="right")
+            struct_slice = struct_df.iloc[max(0, s_end - window):s_end]
+            t_end = trend_df.index.searchsorted(bar_ts, side="right")
+            trend_slice = trend_df.iloc[max(0, t_end - window):t_end]
 
             if len(struct_slice) < 50 or len(trend_slice) < 50:
                 self.equity_curve.append(balance)
+                self.equity_timestamps.append(bar_ts)
                 continue
 
             tf_slices = {
@@ -94,8 +101,8 @@ class Backtester:
                 trend_tf: trend_slice,
             }
 
-            # Evaluate strategy
-            signal: Optional[TradeSignal] = self.strategy.evaluate(tf_slices, effective_price)
+            # Evaluate strategy — pass bar_ts so kill zone uses simulated time, not real time
+            signal: Optional[TradeSignal] = self.strategy.evaluate(tf_slices, effective_price, bar_time=bar_ts)
 
             if signal is not None and self.rm.can_open_trade(signal, balance):
                 pos = self.rm.open_position(signal, balance)
@@ -106,6 +113,7 @@ class Backtester:
             unrealised = sum(p.unrealized_pnl for p in self.rm.open_positions)
             total_equity = balance + unrealised
             self.equity_curve.append(total_equity)
+            self.equity_timestamps.append(bar_ts)
 
             peak_balance = max(peak_balance, total_equity)
             dd = peak_balance - total_equity
@@ -150,8 +158,8 @@ class Backtester:
         expectancy_r = win_rate * avg_win_r + (1 - win_rate) * avg_loss_r
 
         # Sharpe / Sortino (using daily equity returns)
-        eq = pd.Series(self.equity_curve)
-        daily_returns = eq.resample("D", closed="right").last().pct_change().dropna()
+        eq = pd.Series(self.equity_curve, index=pd.DatetimeIndex(self.equity_timestamps))
+        daily_returns = eq.resample("D").last().pct_change().dropna()
         sharpe = 0.0
         sortino = 0.0
         if len(daily_returns) > 1:

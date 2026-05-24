@@ -1,6 +1,6 @@
-# DomwiBot — BTC/USDT SMC Trading Bot
+# DomwiBot — Sol/USDT SMC Trading Bot
 
-A professional-grade Bitcoin swing trading bot built around the same edge
+A professional-grade Solana swing trading bot built around the same edge
 the top 1% of crypto traders use: **Smart Money Concepts (SMC)** combined
 with **multi-timeframe trend filtering** and strict risk management.
 
